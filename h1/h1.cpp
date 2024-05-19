@@ -74,16 +74,8 @@ struct GA {
     }
 
     void Run(int maxGenerations) {
-        if(numOfThreads == -1) {
-            numOfThreads = std::thread::hardware_concurrency();
-            if (numOfThreads == 0) {
-                numOfThreads = 2;
-            }
-        }
-
         std::vector<Individual> nextGeneration;
         for (int c = 0; c < maxGenerations; c++) {
-            //std::cout << "Here " << c << std::endl;
             RankIndividuals();
 
             if (c % 1000 == 0)
@@ -94,33 +86,11 @@ struct GA {
                 nextGeneration.push_back(generation[index]);
             }
 
-            //std::cout << "Here B" << c << std::endl;
-            std::vector<std::thread> threads;
-            //threads.reserve(numOfThreads);
-            int chunkSizeC = params.crossOverCount / numOfThreads;
-            int cOffset = params.crossOverCount % numOfThreads;
-            int chunkSizeM = params.mutatedCount / numOfThreads;
-            int mOffset = params.mutatedCount % numOfThreads;
-
-            for(int t = 0; t < numOfThreads; t++) {
-                //std::cout << "Here T" << t << std::endl;
-                if(t == numOfThreads-1) {
-                    chunkSizeC += cOffset;
-                    chunkSizeM += mOffset;
-                }
-                threads.emplace_back([this, &chunkSizeC, &chunkSizeM, &nextGeneration]() {
-                    std::lock_guard<std::mutex> lock(mtx);
-                    for (int index = 0; index < chunkSizeC; index++) {
-                        std::uniform_int_distribution<int> individualPicker(0, generation.size() - 1);
-                        const Individual &a = generation[individualPicker(rng)];
-                        const Individual &b = generation[individualPicker(rng)];
-                        nextGeneration.push_back(CrossOver(a, b));
-                    }
-                });
-            }
-            for(auto &th : threads) {
-                th.join();
-                //threads.pop_back();
+            for (int index = 0; index < params.crossOverCount; index++) {
+                std::uniform_int_distribution<int> individualPicker(0, generation.size() - 1);
+                const Individual &a = generation[individualPicker(rng)];
+                const Individual &b = generation[individualPicker(rng)];
+                nextGeneration.push_back(CrossOver(a, b));
             }
 
             std::uniform_int_distribution<int> individualPicker(0, nextGeneration.size() - 1);
@@ -139,9 +109,29 @@ struct GA {
     }
 
     void RankIndividuals() {
-        for (int c = 0; c < generation.size(); c++) {
-            generation[c].diff = eval.Evaluate(generation[c].data);
+        int numThreads = std::thread::hardware_concurrency();
+        if (numThreads == 0) {
+            numThreads = 2; // Fallback to 2 threads if hardware_concurrency() returns 0
         }
+
+        std::vector<std::thread> threads;
+        int chunkSize = generation.size() / numThreads;
+
+        for (int t = 0; t < numThreads; t++) {
+            int start = t * chunkSize;
+            int end = (t == numThreads - 1) ? generation.size() : (t + 1) * chunkSize;
+
+            threads.emplace_back([this, start, end]() {
+                for (int i = start; i < end; i++) {
+                    generation[i].diff = eval.Evaluate(generation[i].data);
+                }
+            });
+        }
+
+        for (auto &t : threads) {
+            t.join();
+        }
+
         std::sort(generation.begin(), generation.end(), [this](const Individual &a, const Individual &b) {
             return a.diff < b.diff;
         });
