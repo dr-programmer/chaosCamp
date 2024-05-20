@@ -6,11 +6,23 @@
 #include <random>
 #include <thread>
 #include <mutex>
-#include <chrono>
-#include <future>
 
 std::mutex mtx;
-int numOfThreads = 1;
+
+// Change the value of numOfThreads to change the number of threads to be used
+// Leave numOfThreads to -1 if you want the system to figure it out
+// I have parallelized the RankIndividuals() function so it is divided in chunks
+// - each chunk is then given to an individual thread
+
+// In addition I think it is possible to parallelize the Run() method
+// - so that the for() loop for CrossOver() is done in chunks
+// - and each chunk calculated in its own thread
+// ^^^~~~> but then you get different steps for the GA algorithm
+// ^^^~~~> and I am not sure if it is still correct (also on my machine it is slower)
+// ^^^~~~> I will leave the parallelized form of Run() in the RunWithP() method of GA
+// ^^^~~~> if you want you can try it and tell me if it is correct or not - thanks!
+
+int numOfThreads = -1;
 
 struct GuessEvaluator {
     std::string target;
@@ -74,84 +86,130 @@ struct GA {
         }
     }
 
-void Run(int maxGenerations) {
-    std::vector<Individual> nextGeneration;
-    nextGeneration.reserve(params.generationSize);
-
-    for (int c = 0; c < maxGenerations; c++) {
+    void Run(int maxGenerations) {
+        std::vector<Individual> nextGeneration;
+        for (int c = 0; c < maxGenerations; c++) {
             auto start = std::chrono::high_resolution_clock::now();
             RankIndividuals();
 
-        if (c % 1000 == 0) {
-            std::cout << generation[0].diff << ": " << generation[0].data << std::endl;
-        }
+            if (c % 1000 == 0)
+                std::cout << generation[0].diff << ": " << generation[0].data << std::endl;
+            nextGeneration.reserve(generation.size());
 
-        nextGeneration.assign(generation.begin(), generation.begin() + params.eliteCount);
+            for (int index = 0; index < params.eliteCount; index++) {
+                nextGeneration.push_back(generation[index]);
+            }
 
-        auto crossoverFuture = std::async(std::launch::async, [this, &nextGeneration]() {
-            std::vector<Individual> crossoverResults;
-            crossoverResults.reserve(params.crossOverCount);
-            std::uniform_int_distribution<int> individualPicker(0, generation.size() - 1);
-            for (int i = 0; i < params.crossOverCount; ++i) {
+            for (int index = 0; index < params.crossOverCount; index++) {
+                std::uniform_int_distribution<int> individualPicker(0, generation.size() - 1);
                 const Individual &a = generation[individualPicker(rng)];
                 const Individual &b = generation[individualPicker(rng)];
-                crossoverResults.push_back(CrossOver(a, b));
+                nextGeneration.push_back(CrossOver(a, b));
             }
-            std::lock_guard<std::mutex> lock(mtx);
-            nextGeneration.insert(nextGeneration.end(), crossoverResults.begin(), crossoverResults.end());
-        });
 
-        auto mutationFuture = std::async(std::launch::async, [this, &nextGeneration]() {
-            std::vector<Individual> mutationResults;
-            mutationResults.reserve(params.mutatedCount);
             std::uniform_int_distribution<int> individualPicker(0, nextGeneration.size() - 1);
-            for (int i = 0; i < params.mutatedCount; ++i) {
+            for (int index = 0; index < params.mutatedCount; index++) {
                 const Individual &source = nextGeneration[individualPicker(rng)];
-                mutationResults.push_back(Mutate(source));
+                nextGeneration.push_back(Mutate(source));
             }
-            std::lock_guard<std::mutex> lock(mtx);
-            nextGeneration.insert(nextGeneration.end(), mutationResults.begin(), mutationResults.end());
-        });
 
-        crossoverFuture.get();
-        mutationFuture.get();
+            while (nextGeneration.size() < params.generationSize) {
+                nextGeneration.push_back(RandomIndividual());
+            }
 
-        while (nextGeneration.size() < params.generationSize) {
-            nextGeneration.push_back(RandomIndividual());
-        }
-
-        generation.swap(nextGeneration);
-        nextGeneration.clear();
-        nextGeneration.reserve(params.generationSize);
-                    auto end = std::chrono::high_resolution_clock::now();
+            generation.swap(nextGeneration);
+            nextGeneration.clear();
+            auto end = std::chrono::high_resolution_clock::now();
             auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
             if(c % 100 == 0) std::cout << "Duration (us): " << duration.count() << std::endl;
+        }
     }
-}
 
+    void RunWithP(int maxGenerations) {
+        std::vector<Individual> nextGeneration;
+        for (int c = 0; c < maxGenerations; c++) {
+            auto start = std::chrono::high_resolution_clock::now();
+            RankIndividuals();
+
+            if (c % 1000 == 0)
+                std::cout << generation[0].diff << ": " << generation[0].data << std::endl;
+            nextGeneration.reserve(generation.size());
+
+            for (int index = 0; index < params.eliteCount; index++) {
+                nextGeneration.push_back(generation[index]);
+            }
+
+            std::vector<std::thread> threads;
+            int chunkSizeC = params.crossOverCount / numOfThreads;
+            int cOffset = params.crossOverCount % numOfThreads;
+            int chunkSizeM = params.mutatedCount / numOfThreads;
+            int mOffset = params.mutatedCount % numOfThreads;
+
+            for(int t = 0; t < numOfThreads; t++) {
+                if(t == numOfThreads-1) {
+                    chunkSizeC += cOffset;
+                    chunkSizeM += mOffset;
+                }
+                threads.emplace_back([this, &chunkSizeC, &chunkSizeM, &nextGeneration]() {
+                    std::lock_guard<std::mutex> lock(mtx);
+                    for (int index = 0; index < chunkSizeC; index++) {
+                        std::uniform_int_distribution<int> individualPicker(0, generation.size() - 1);
+                        const Individual &a = generation[individualPicker(rng)];
+                        const Individual &b = generation[individualPicker(rng)];
+                        nextGeneration.push_back(CrossOver(a, b));
+                    }
+
+                });
+            }
+            for(auto &th : threads) {
+                th.join();
+            }
+            std::uniform_int_distribution<int> individualPicker(0, nextGeneration.size() - 1);
+            for (int index = 0; index < params.mutatedCount; index++) {
+                const Individual &source = nextGeneration[individualPicker(rng)];
+                nextGeneration.push_back(Mutate(source));
+            }
+            while (nextGeneration.size() < params.generationSize) {
+                nextGeneration.push_back(RandomIndividual());
+            }
+
+            generation.swap(nextGeneration);
+            nextGeneration.clear();
+            auto end = std::chrono::high_resolution_clock::now();
+            auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+            if(c % 100 == 0) std::cout << "Duration (us): " << duration.count() << std::endl;
+        }
+    }
 
     void RankIndividuals() {
-        for (int c = 0; c < generation.size(); c++) {
-            generation[c].diff = eval.Evaluate(generation[c].data);
+        if(numOfThreads == -1) {
+            numOfThreads = std::thread::hardware_concurrency();
+            if(numOfThreads == 0) {
+                numOfThreads = 1;
+            }
         }
+
+        std::vector<std::thread> threads;
+        int chunkSize = generation.size() / numOfThreads;
+
+        for (int t = 0; t < numOfThreads; t++) {
+            int start = t * chunkSize;
+            int end = (t == numOfThreads - 1) ? generation.size() : (t + 1) * chunkSize;
+
+            threads.emplace_back([this, start, end]() {
+                for (int i = start; i < end; i++) {
+                    generation[i].diff = eval.Evaluate(generation[i].data);
+                }
+            });
+        }
+
+        for (auto &t : threads) {
+            t.join();
+        }
+
         std::sort(generation.begin(), generation.end(), [this](const Individual &a, const Individual &b) {
             return a.diff < b.diff;
         });
-    }
-
-    void EvaluateTask(int start, int end) {
-        for (int c = start; c < end; c++) {
-            generation[c].diff = eval.Evaluate(generation[c].data);
-        }
-    }
-
-    void CrossOverTask(std::vector<Individual> &nextGeneration) {
-        std::uniform_int_distribution<int> individualPicker(0, generation.size() - 1);
-        const Individual &a = generation[individualPicker(rng)];
-        const Individual &b = generation[individualPicker(rng)];
-        Individual child = CrossOver(a, b);
-        std::lock_guard<std::mutex> lock(mtx);
-        nextGeneration.push_back(child);
     }
 
     Individual CrossOver(const Individual &a, const Individual &b) {
@@ -201,6 +259,7 @@ void Run(int maxGenerations) {
         return i;
     }
 };
+
 
 int main() {
     GuessEvaluator eval{ R"(struct GAParams {
