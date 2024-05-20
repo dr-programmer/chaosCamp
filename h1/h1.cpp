@@ -6,10 +6,11 @@
 #include <random>
 #include <thread>
 #include <mutex>
+#include <chrono>
+#include <future>
 
 std::mutex mtx;
-
-int numOfThreads = -1;
+int numOfThreads = 1;
 
 struct GuessEvaluator {
     std::string target;
@@ -73,40 +74,61 @@ struct GA {
         }
     }
 
-    void Run(int maxGenerations) {
-        std::vector<Individual> nextGeneration;
-        for (int c = 0; c < maxGenerations; c++) {
+void Run(int maxGenerations) {
+    std::vector<Individual> nextGeneration;
+    nextGeneration.reserve(params.generationSize);
+
+    for (int c = 0; c < maxGenerations; c++) {
+            auto start = std::chrono::high_resolution_clock::now();
             RankIndividuals();
 
-            if (c % 1000 == 0)
-                std::cout << generation[0].diff << ": " << generation[0].data << std::endl;
-            nextGeneration.reserve(generation.size());
+        if (c % 1000 == 0) {
+            std::cout << generation[0].diff << ": " << generation[0].data << std::endl;
+        }
 
-            for (int index = 0; index < params.eliteCount; index++) {
-                nextGeneration.push_back(generation[index]);
-            }
+        nextGeneration.assign(generation.begin(), generation.begin() + params.eliteCount);
 
-            for (int index = 0; index < params.crossOverCount; index++) {
-                std::uniform_int_distribution<int> individualPicker(0, generation.size() - 1);
+        auto crossoverFuture = std::async(std::launch::async, [this, &nextGeneration]() {
+            std::vector<Individual> crossoverResults;
+            crossoverResults.reserve(params.crossOverCount);
+            std::uniform_int_distribution<int> individualPicker(0, generation.size() - 1);
+            for (int i = 0; i < params.crossOverCount; ++i) {
                 const Individual &a = generation[individualPicker(rng)];
                 const Individual &b = generation[individualPicker(rng)];
-                nextGeneration.push_back(CrossOver(a, b));
+                crossoverResults.push_back(CrossOver(a, b));
             }
+            std::lock_guard<std::mutex> lock(mtx);
+            nextGeneration.insert(nextGeneration.end(), crossoverResults.begin(), crossoverResults.end());
+        });
 
+        auto mutationFuture = std::async(std::launch::async, [this, &nextGeneration]() {
+            std::vector<Individual> mutationResults;
+            mutationResults.reserve(params.mutatedCount);
             std::uniform_int_distribution<int> individualPicker(0, nextGeneration.size() - 1);
-            for (int index = 0; index < params.mutatedCount; index++) {
+            for (int i = 0; i < params.mutatedCount; ++i) {
                 const Individual &source = nextGeneration[individualPicker(rng)];
-                nextGeneration.push_back(Mutate(source));
+                mutationResults.push_back(Mutate(source));
             }
+            std::lock_guard<std::mutex> lock(mtx);
+            nextGeneration.insert(nextGeneration.end(), mutationResults.begin(), mutationResults.end());
+        });
 
-            while (nextGeneration.size() < params.generationSize) {
-                nextGeneration.push_back(RandomIndividual());
-            }
+        crossoverFuture.get();
+        mutationFuture.get();
 
-            generation.swap(nextGeneration);
-            nextGeneration.clear();
+        while (nextGeneration.size() < params.generationSize) {
+            nextGeneration.push_back(RandomIndividual());
         }
+
+        generation.swap(nextGeneration);
+        nextGeneration.clear();
+        nextGeneration.reserve(params.generationSize);
+                    auto end = std::chrono::high_resolution_clock::now();
+            auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+            if(c % 100 == 0) std::cout << "Duration (us): " << duration.count() << std::endl;
     }
+}
+
 
     void RankIndividuals() {
         for (int c = 0; c < generation.size(); c++) {
@@ -115,6 +137,21 @@ struct GA {
         std::sort(generation.begin(), generation.end(), [this](const Individual &a, const Individual &b) {
             return a.diff < b.diff;
         });
+    }
+
+    void EvaluateTask(int start, int end) {
+        for (int c = start; c < end; c++) {
+            generation[c].diff = eval.Evaluate(generation[c].data);
+        }
+    }
+
+    void CrossOverTask(std::vector<Individual> &nextGeneration) {
+        std::uniform_int_distribution<int> individualPicker(0, generation.size() - 1);
+        const Individual &a = generation[individualPicker(rng)];
+        const Individual &b = generation[individualPicker(rng)];
+        Individual child = CrossOver(a, b);
+        std::lock_guard<std::mutex> lock(mtx);
+        nextGeneration.push_back(child);
     }
 
     Individual CrossOver(const Individual &a, const Individual &b) {
@@ -164,7 +201,6 @@ struct GA {
         return i;
     }
 };
-
 
 int main() {
     GuessEvaluator eval{ R"(struct GAParams {
