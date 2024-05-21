@@ -87,7 +87,7 @@ struct GA {
     }
 
     void Run(int maxGenerations) {
-        std::vector<Individual> nextGeneration;
+        
         std::vector<std::thread> threads;
         if(numOfThreads == -1) {
             numOfThreads = std::thread::hardware_concurrency();
@@ -99,8 +99,9 @@ struct GA {
         int generationChunkOffset = maxGenerations % numOfThreads;
         for(int t = 0; t < numOfThreads; t++) {
             if(t == numOfThreads - 1) generationChunk += generationChunkOffset;
-            threads.emplace_back([this, &generationChunk, &nextGeneration]{
+            threads.emplace_back([this, &generationChunk]{
             for (int c = 0; c < generationChunk; c++) {
+                std::vector<Individual> nextGeneration;
                 std::lock_guard<std::mutex> lock(mtx);
                 auto start = std::chrono::high_resolution_clock::now();
                 RankIndividuals();
@@ -131,7 +132,7 @@ struct GA {
                 }
 
                 generation.swap(nextGeneration);
-                nextGeneration.clear();
+                //nextGeneration.clear();
                 auto end = std::chrono::high_resolution_clock::now();
                 auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
                 if(c % 100 == 0) std::cout << "Duration (us): " << duration.count() << std::endl;
