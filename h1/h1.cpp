@@ -88,41 +88,57 @@ struct GA {
 
     void Run(int maxGenerations) {
         std::vector<Individual> nextGeneration;
-        for (int c = 0; c < maxGenerations; c++) {
-            auto start = std::chrono::high_resolution_clock::now();
-            RankIndividuals();
-
-            if (c % 1000 == 0)
-                std::cout << generation[0].diff << ": " << generation[0].data << std::endl;
-            nextGeneration.reserve(generation.size());
-
-            for (int index = 0; index < params.eliteCount; index++) {
-                nextGeneration.push_back(generation[index]);
+        std::vector<std::thread> threads;
+        if(numOfThreads == -1) {
+            numOfThreads = std::thread::hardware_concurrency();
+            if(numOfThreads == 0) {
+                numOfThreads = 1;
             }
-
-            for (int index = 0; index < params.crossOverCount; index++) {
-                std::uniform_int_distribution<int> individualPicker(0, generation.size() - 1);
-                const Individual &a = generation[individualPicker(rng)];
-                const Individual &b = generation[individualPicker(rng)];
-                nextGeneration.push_back(CrossOver(a, b));
-            }
-
-            std::uniform_int_distribution<int> individualPicker(0, nextGeneration.size() - 1);
-            for (int index = 0; index < params.mutatedCount; index++) {
-                const Individual &source = nextGeneration[individualPicker(rng)];
-                nextGeneration.push_back(Mutate(source));
-            }
-
-            while (nextGeneration.size() < params.generationSize) {
-                nextGeneration.push_back(RandomIndividual());
-            }
-
-            generation.swap(nextGeneration);
-            nextGeneration.clear();
-            auto end = std::chrono::high_resolution_clock::now();
-            auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
-            if(c % 100 == 0) std::cout << "Duration (us): " << duration.count() << std::endl;
         }
+        int generationChunk = maxGenerations / numOfThreads;
+        int generationChunkOffset = maxGenerations % numOfThreads;
+        for(int t = 0; t < numOfThreads; t++) {
+            if(t == numOfThreads - 1) generationChunk += generationChunkOffset;
+            threads.emplace_back([this, &generationChunk, &nextGeneration]{
+            for (int c = 0; c < generationChunk; c++) {
+                std::lock_guard<std::mutex> lock(mtx);
+                auto start = std::chrono::high_resolution_clock::now();
+                RankIndividuals();
+
+                if (c % 1000 == 0)
+                    std::cout << generation[0].diff << ": " << generation[0].data << std::endl;
+                nextGeneration.reserve(generation.size());
+
+                for (int index = 0; index < params.eliteCount; index++) {
+                    nextGeneration.push_back(generation[index]);
+                }
+
+                for (int index = 0; index < params.crossOverCount; index++) {
+                    std::uniform_int_distribution<int> individualPicker(0, generation.size() - 1);
+                    const Individual &a = generation[individualPicker(rng)];
+                    const Individual &b = generation[individualPicker(rng)];
+                    nextGeneration.push_back(CrossOver(a, b));
+                }
+
+                std::uniform_int_distribution<int> individualPicker(0, nextGeneration.size() - 1);
+                for (int index = 0; index < params.mutatedCount; index++) {
+                    const Individual &source = nextGeneration[individualPicker(rng)];
+                    nextGeneration.push_back(Mutate(source));
+                }
+
+                while (nextGeneration.size() < params.generationSize) {
+                    nextGeneration.push_back(RandomIndividual());
+                }
+
+                generation.swap(nextGeneration);
+                nextGeneration.clear();
+                auto end = std::chrono::high_resolution_clock::now();
+                auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+                if(c % 100 == 0) std::cout << "Duration (us): " << duration.count() << std::endl;
+            }
+            });
+        }
+    for(auto &th : threads) th.join();
     }
 
     void RunWithP(int maxGenerations) {
