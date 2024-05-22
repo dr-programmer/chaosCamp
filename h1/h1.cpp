@@ -6,15 +6,26 @@
 #include <random>
 #include <thread>
 #include <mutex>
+#include <execution>
 
 std::mutex mtx;
 
 // Change the value of numOfThreads to change the number of threads to be used
 // Leave numOfThreads to -1 if you want the system to figure it out
-// I have parallelized the RankIndividuals() function so it is divided in chunks
-// - each chunk is then given to an individual thread
 
-// In addition I think it is possible to parallelize the Run() method
+// I have parallelized the Run() method so that the generations are split into chunks
+// - and each chunk is then ranked, crossed-over and mutated
+// - and then merged to the shared vector<Individual> generation
+// Also the std::sort() is now implemented to run in paralled
+// - by adding std::execution::par_unseq as the first argument and including <execution>
+
+// I have also parallelized the RankIndividuals() function so it is divided in chunks
+// - each chunk is then given to an individual thread
+// - this is just an idea - the uncommented version isn't parallelized
+// - look over the commented RankIndividuals() if you want
+// - it isn't used as of right now because on my machine it is slower
+
+// In addition I think it is possible to parallelize the Run() method in another way
 // - so that the for() loop for CrossOver() is done in chunks
 // - and each chunk calculated in its own thread
 // ^^^~~~> but then you get different steps for the GA algorithm
@@ -98,16 +109,18 @@ struct GA {
         int generationChunk = maxGenerations / numOfThreads;
         int generationChunkOffset = maxGenerations % numOfThreads;
         for(int t = 0; t < numOfThreads; t++) {
+            
             if(t == numOfThreads - 1) generationChunk += generationChunkOffset;
             threads.emplace_back([this, &generationChunk]{
             for (int c = 0; c < generationChunk; c++) {
-                std::vector<Individual> nextGeneration;
                 std::lock_guard<std::mutex> lock(mtx);
+
+                std::vector<Individual> nextGeneration;
                 auto start = std::chrono::high_resolution_clock::now();
                 RankIndividuals();
 
                 if (c % 1000 == 0)
-                    std::cout << generation[0].diff << ": " << generation[0].data << std::endl;
+                    std::cout << generation[0].diff << "version: " << c << ": " << generation[0].data << std::endl;
                 nextGeneration.reserve(generation.size());
 
                 for (int index = 0; index < params.eliteCount; index++) {
@@ -131,7 +144,7 @@ struct GA {
                     nextGeneration.push_back(RandomIndividual());
                 }
 
-                generation.swap(nextGeneration);
+                this->generation.swap(nextGeneration);
                 //nextGeneration.clear();
                 auto end = std::chrono::high_resolution_clock::now();
                 auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
@@ -197,7 +210,7 @@ struct GA {
             if(c % 100 == 0) std::cout << "Duration (us): " << duration.count() << std::endl;
         }
     }
-
+/*
     void RankIndividuals() {
         if(numOfThreads == -1) {
             numOfThreads = std::thread::hardware_concurrency();
@@ -225,6 +238,16 @@ struct GA {
         }
 
         std::sort(generation.begin(), generation.end(), [this](const Individual &a, const Individual &b) {
+            return a.diff < b.diff;
+        });
+    }
+*/
+
+    void RankIndividuals() {
+        for (int c = 0; c < generation.size(); c++) {
+            generation[c].diff = eval.Evaluate(generation[c].data);
+        }
+        std::sort(std::execution::par_unseq, generation.begin(), generation.end(), [this](const Individual &a, const Individual &b) {
             return a.diff < b.diff;
         });
     }
